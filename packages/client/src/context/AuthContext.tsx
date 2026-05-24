@@ -11,61 +11,111 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const disableAuth = (import.meta.env.VITE_DISABLE_AUTH ?? 'false') === 'true';
+const demoUser: User = {
+  id: 1,
+  email: 'demo@portfolio.local',
+  name: 'Demo User',
+  is_admin: 1,
+  created_at: new Date().toISOString(),
+  last_login: new Date().toISOString(),
+};
+
+async function parseJsonSafely(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text };
+  }
+}
+
+async function apiRequest(path: string, init?: RequestInit): Promise<any> {
+  const res = await fetch(path, { credentials: 'include', ...init });
+  const data = await parseJsonSafely(res);
+  if (!res.ok) {
+    const message =
+      data?.error ||
+      data?.message ||
+      `Request failed (${res.status})`;
+    throw new Error(message);
+  }
+  return data;
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch('/api/auth/me', { credentials: 'include' })
-      .then(res => {
-        if (res.ok) return res.json();
-        throw new Error('Not authenticated');
-      })
+    if (disableAuth) {
+      setUser(demoUser);
+      setLoading(false);
+      return;
+    }
+    apiRequest('/api/auth/me')
       .then(data => setUser(data.user))
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, []);
 
   const login = async (email: string) => {
-    const res = await fetch('/api/auth/request-token', {
+    if (disableAuth) {
+      setUser({ ...demoUser, email: email.trim().toLowerCase() || demoUser.email });
+      return { success: true, message: 'Auth disabled in demo mode', dev_token: '000000' };
+    }
+    return apiRequest('/api/auth/request-token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email }),
-      credentials: 'include',
     });
-    return res.json();
   };
 
   const verifyToken = async (email: string, token: string) => {
-    const res = await fetch('/api/auth/verify-token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, token }),
-      credentials: 'include',
-    });
-    const data = await res.json();
-    if (res.ok && data.user) {
-      setUser(data.user);
+    if (disableAuth) {
+      setUser({ ...demoUser, email: email.trim().toLowerCase() || demoUser.email });
       return { success: true };
     }
-    return { success: false, error: data.error || 'Verification failed' };
+    try {
+      const data = await apiRequest('/api/auth/verify-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, token }),
+      });
+      if (data.user) {
+        setUser(data.user);
+        return { success: true };
+      }
+      return { success: false, error: 'Verification failed' };
+    } catch (error: any) {
+      return { success: false, error: error?.message || 'Verification failed' };
+    }
   };
 
   const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
-    setUser(null);
+    if (disableAuth) {
+      setUser(demoUser);
+      return;
+    }
+    try {
+      await apiRequest('/api/auth/logout', { method: 'POST' });
+    } finally {
+      setUser(null);
+    }
   };
 
   const updateProfile = async (name: string) => {
-    const res = await fetch('/api/auth/profile', {
+    if (disableAuth) {
+      setUser(prev => prev ? { ...prev, name } : { ...demoUser, name });
+      return;
+    }
+    const data = await apiRequest('/api/auth/profile', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name }),
-      credentials: 'include',
     });
-    if (res.ok) {
-      const data = await res.json();
+    if (data.user) {
       setUser(data.user);
     }
   };

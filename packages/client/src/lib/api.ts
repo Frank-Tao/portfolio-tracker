@@ -14,6 +14,8 @@ import type {
   ImportResult,
   CashSummary,
   CashMovementType,
+  AdminUserSummary,
+  ActivityLogItem,
 } from '@portfolio/shared';
 
 const BASE = '/api';
@@ -115,5 +117,13 @@ export const api = {
   },
   import: {
     fromPath: (path: string) => post<ImportResult>('/import/excel/path', { path }),
+  },
+  admin: {
+    users: () => get<AdminUserSummary[]>('/admin/users'),
+    activities: (limit = 200, userId?: number) => {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (userId) params.set('user_id', String(userId));
+      return get<ActivityLogItem[]>(`/admin/activities?${params}`);
+    },
   },
 };

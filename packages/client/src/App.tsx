@@ -7,30 +7,32 @@ import Allocation from './pages/Allocation';
 import Transactions from './pages/Transactions';
 import Cash from './pages/Cash';
 import Performance from './pages/Performance';
-import Export from './pages/Export';
+import Snapshots from './pages/Snapshots';
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
+import Admin from './pages/Admin';
 import Login from './pages/Login';
 import { useSettings } from './context/SettingsContext';
 import { useAuth } from './context/AuthContext';
 import { updateFormatSettings } from './lib/format';
 
-const navItems = [
+type NavItem = { path: string; label: string; adminOnly?: boolean };
+
+const navItems: NavItem[] = [
   { path: '/', label: 'Dashboard' },
   { path: '/holdings', label: 'Holdings' },
   { path: '/transactions', label: 'Transactions' },
   { path: '/cash', label: 'Cash' },
   { path: '/performance', label: 'Performance' },
   { path: '/allocation', label: 'Allocation' },
-  { path: '/export', label: 'Export' },
-  { path: '/settings', label: 'Settings' },
-  { path: '/profile', label: 'Profile' },
+  { path: '/snapshots', label: 'Snapshots' },
 ];
 
 function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const { settings } = useSettings();
-  const { user, loading: authLoading } = useAuth();
+  const { user, logout, loading: authLoading } = useAuth();
 
   useEffect(() => {
     updateFormatSettings({
@@ -81,19 +83,22 @@ function App() {
 
         {/* Sidebar */}
         <aside className={`
-          fixed inset-y-0 left-0 z-20 w-52 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 p-4 flex-shrink-0
+          fixed inset-y-0 left-0 z-20 w-52 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 p-4 flex flex-col flex-shrink-0
           transform transition-transform duration-200 ease-in-out
           lg:relative lg:translate-x-0
           ${mobileMenuOpen ? 'translate-x-0 pt-16' : '-translate-x-full'}
         `}>
           <h1 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-6 hidden lg:block">Portfolio Tracker</h1>
-          <nav className="space-y-1">
+          <nav className="space-y-1 flex-1">
             {navItems.map(item => (
               <NavLink
                 key={item.path}
                 to={item.path}
                 end={item.path === '/'}
-                onClick={() => setMobileMenuOpen(false)}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setAccountMenuOpen(false);
+                }}
                 className={({ isActive }) =>
                   `block px-3 py-2 rounded-md text-sm font-medium ${
                     isActive
@@ -106,6 +111,88 @@ function App() {
               </NavLink>
             ))}
           </nav>
+
+          <div className="mt-4 pt-3 border-t border-gray-200 dark:border-gray-700">
+            <button
+              type="button"
+              onClick={() => setAccountMenuOpen(v => !v)}
+              className="w-full px-3 py-2 rounded-md text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-medium text-gray-900 dark:text-gray-100 truncate">{user.name || 'Account'}</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{user.email}</p>
+                </div>
+                <span className="text-gray-500 dark:text-gray-400">{accountMenuOpen ? '▴' : '▾'}</span>
+              </div>
+            </button>
+
+            {accountMenuOpen && (
+              <div className="mt-1 space-y-1">
+                <NavLink
+                  to="/profile"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setAccountMenuOpen(false);
+                  }}
+                  className={({ isActive }) =>
+                    `block px-3 py-2 rounded-md text-sm ${
+                      isActive
+                        ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                        : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                    }`
+                  }
+                >
+                  Profile
+                </NavLink>
+                <NavLink
+                  to="/settings"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    setAccountMenuOpen(false);
+                  }}
+                  className={({ isActive }) =>
+                    `block px-3 py-2 rounded-md text-sm ${
+                      isActive
+                        ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                        : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                    }`
+                  }
+                >
+                  Settings
+                </NavLink>
+                {user.is_admin ? (
+                  <NavLink
+                    to="/admin"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      setAccountMenuOpen(false);
+                    }}
+                    className={({ isActive }) =>
+                      `block px-3 py-2 rounded-md text-sm ${
+                        isActive
+                          ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                          : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
+                      }`
+                    }
+                  >
+                    Admin
+                  </NavLink>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setMobileMenuOpen(false);
+                    setAccountMenuOpen(false);
+                    await logout();
+                  }}
+                  className="block w-full text-left px-3 py-2 rounded-md text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+                >
+                  Sign Out
+                </button>
+              </div>
+            )}
+          </div>
         </aside>
 
         {/* Main content */}
@@ -118,9 +205,10 @@ function App() {
             <Route path="/cash" element={<Cash />} />
             <Route path="/performance" element={<Performance />} />
             <Route path="/allocation" element={<Allocation />} />
-            <Route path="/export" element={<Export />} />
+            <Route path="/snapshots" element={<Snapshots />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="/profile" element={<Profile />} />
+            <Route path="/admin" element={<Admin />} />
           </Routes>
         </main>
       </div>

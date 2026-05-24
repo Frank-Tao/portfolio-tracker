@@ -1,18 +1,20 @@
 import { Router } from 'express';
 import db from '../db/connection.js';
 import type { TaxReport } from '@portfolio/shared';
+import type { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
-router.get('/transactions', (req, res) => {
+router.get('/transactions', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const { from, to, fund_id, format } = req.query;
   let sql = `
     SELECT t.*, f.ticker, f.name as fund_name
     FROM transactions t
-    JOIN funds f ON t.fund_id = f.id
-    WHERE 1=1
+    JOIN funds f ON t.fund_id = f.id AND f.user_id = t.user_id
+    WHERE t.user_id = ?
   `;
-  const params: any[] = [];
+  const params: any[] = [userId];
 
   if (fund_id) { sql += ' AND t.fund_id = ?'; params.push(fund_id); }
   if (from) { sql += ' AND t.date >= ?'; params.push(from); }
@@ -31,18 +33,24 @@ router.get('/transactions', (req, res) => {
   res.json(rows);
 });
 
-router.get('/holdings', (req, res) => {
+router.get('/holdings', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const { format } = req.query;
-  const funds = db.prepare('SELECT f.*, b.name as bucket_name FROM funds f LEFT JOIN buckets b ON f.bucket_id = b.id').all() as any[];
+  const funds = db.prepare(`
+    SELECT f.*, b.name as bucket_name
+    FROM funds f
+    LEFT JOIN buckets b ON f.bucket_id = b.id AND b.user_id = f.user_id
+    WHERE f.user_id = ?
+  `).all(userId) as any[];
 
   const holdings = funds.map(f => {
-    const buyQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'buy'`).get(f.id) as any;
-    const sellQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'sell'`).get(f.id) as any;
+    const buyQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'buy'`).get(userId, f.id) as any;
+    const sellQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'sell'`).get(userId, f.id) as any;
     const qty = buyQty.total - sellQty.total;
     if (qty <= 0) return null;
 
-    const invested = db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE fund_id = ?`).get(f.id) as any;
-    const latestPrice = db.prepare(`SELECT price FROM price_history WHERE fund_id = ? ORDER BY date DESC LIMIT 1`).get(f.id) as any;
+    const invested = db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ?`).get(userId, f.id) as any;
+    const latestPrice = db.prepare(`SELECT price FROM price_history WHERE user_id = ? AND fund_id = ? ORDER BY date DESC LIMIT 1`).get(userId, f.id) as any;
     const price = latestPrice?.price ?? 0;
     const value = qty * price;
 
@@ -70,7 +78,8 @@ router.get('/holdings', (req, res) => {
   res.json(holdings);
 });
 
-router.get('/tax', (req, res) => {
+router.get('/tax', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const { year, format } = req.query;
 
   const fy = parseInt(year as string) || new Date().getFullYear();
@@ -80,10 +89,10 @@ router.get('/tax', (req, res) => {
   const distributions = db.prepare(`
     SELECT d.amount, d.date, f.ticker, f.name
     FROM distributions d
-    JOIN funds f ON d.fund_id = f.id
-    WHERE d.date >= ? AND d.date <= ?
+    JOIN funds f ON d.fund_id = f.id AND f.user_id = d.user_id
+    WHERE d.user_id = ? AND d.date >= ? AND d.date <= ?
     ORDER BY d.date
-  `).all(fyStart, fyEnd) as any[];
+  `).all(userId, fyStart, fyEnd) as any[];
 
   const totalDistributions = distributions.reduce((s: number, d: any) => s + d.amount, 0);
 
@@ -97,10 +106,10 @@ router.get('/tax', (req, res) => {
   const sells = db.prepare(`
     SELECT t.*, f.ticker
     FROM transactions t
-    JOIN funds f ON t.fund_id = f.id
-    WHERE t.type = 'sell' AND t.date >= ? AND t.date <= ?
+    JOIN funds f ON t.fund_id = f.id AND f.user_id = t.user_id
+    WHERE t.user_id = ? AND t.type = 'sell' AND t.date >= ? AND t.date <= ?
     ORDER BY t.date
-  `).all(fyStart, fyEnd) as any[];
+  `).all(userId, fyStart, fyEnd) as any[];
 
   let realizedGains = 0;
   let realizedLosses = 0;
@@ -109,8 +118,8 @@ router.get('/tax', (req, res) => {
     const avgCostResult = db.prepare(`
       SELECT COALESCE(SUM(amount), 0) as total_cost, COALESCE(SUM(quantity), 0) as total_qty
       FROM transactions
-      WHERE fund_id = ? AND type = 'buy' AND date <= ?
-    `).get(sell.fund_id, sell.date) as any;
+      WHERE user_id = ? AND fund_id = ? AND type = 'buy' AND date <= ?
+    `).get(userId, sell.fund_id, sell.date) as any;
 
     const avgCost = avgCostResult.total_qty > 0 ? avgCostResult.total_cost / avgCostResult.total_qty : 0;
     const costBasis = avgCost * sell.quantity;

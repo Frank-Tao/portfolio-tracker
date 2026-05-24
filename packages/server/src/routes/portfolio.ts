@@ -1,33 +1,36 @@
 import { Router } from 'express';
 import db from '../db/connection.js';
 import type { PortfolioSummary, BucketSummary, FundHolding, RebalanceAction } from '@portfolio/shared';
+import type { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
-router.get('/summary', (_req, res) => {
+router.get('/summary', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const funds = db.prepare(`
     SELECT f.*, b.name as bucket_name, b.color as bucket_color, b.id as bucket_id
     FROM funds f
-    LEFT JOIN buckets b ON f.bucket_id = b.id
-  `).all() as any[];
+    LEFT JOIN buckets b ON f.bucket_id = b.id AND b.user_id = f.user_id
+    WHERE f.user_id = ?
+  `).all(userId) as any[];
 
   const holdings: FundHolding[] = funds.map(f => {
     const buyQty = db.prepare(`
-      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'buy'
-    `).get(f.id) as any;
+      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'buy'
+    `).get(userId, f.id) as any;
     const sellQty = db.prepare(`
-      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'sell'
-    `).get(f.id) as any;
+      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'sell'
+    `).get(userId, f.id) as any;
     const totalInvested = db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE fund_id = ?
-    `).get(f.id) as any;
+      SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ?
+    `).get(userId, f.id) as any;
     const totalDistributions = db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as total FROM distributions WHERE fund_id = ?
-    `).get(f.id) as any;
+      SELECT COALESCE(SUM(amount), 0) as total FROM distributions WHERE user_id = ? AND fund_id = ?
+    `).get(userId, f.id) as any;
 
     const latestPrice = db.prepare(`
-      SELECT price FROM price_history WHERE fund_id = ? ORDER BY date DESC LIMIT 1
-    `).get(f.id) as any;
+      SELECT price FROM price_history WHERE user_id = ? AND fund_id = ? ORDER BY date DESC LIMIT 1
+    `).get(userId, f.id) as any;
 
     const currentQty = buyQty.total - sellQty.total;
     const currentPrice = latestPrice?.price ?? null;
@@ -53,13 +56,12 @@ router.get('/summary', (_req, res) => {
   const totalValue = activeHoldings.reduce((sum, h) => sum + (h.current_value ?? 0), 0);
   const totalInvested = activeHoldings.reduce((sum, h) => sum + h.total_invested, 0);
 
-  const cashResult = db.prepare('SELECT COALESCE(SUM(amount), 0) as balance FROM cash_movements').get() as any;
-  const totalDistributions = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM distributions').get() as any;
+  const cashResult = db.prepare('SELECT COALESCE(SUM(amount), 0) as balance FROM cash_movements WHERE user_id = ?').get(userId) as any;
+  const totalDistributions = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM distributions WHERE user_id = ?').get(userId) as any;
+  const lastPriceUpdate = db.prepare('SELECT MAX(date) as last_date FROM price_history WHERE user_id = ?').get(userId) as any;
 
-  const lastPriceUpdate = db.prepare('SELECT MAX(date) as last_date FROM price_history').get() as any;
-
-  const buckets = db.prepare('SELECT * FROM buckets ORDER BY name').all() as any[];
-  const activeProfile = db.prepare('SELECT * FROM profiles WHERE is_active = 1').get() as any;
+  const buckets = db.prepare('SELECT * FROM buckets WHERE user_id = ? ORDER BY name').all(userId) as any[];
+  const activeProfile = db.prepare('SELECT * FROM profiles WHERE user_id = ? AND is_active = 1').get(userId) as any;
 
   const bucketSummaries: BucketSummary[] = buckets.map(b => {
     const bucketFunds = activeHoldings.filter(h => h.bucket_id === b.id);
@@ -69,8 +71,8 @@ router.get('/summary', (_req, res) => {
     let targetPct: number | null = null;
     if (activeProfile) {
       const alloc = db.prepare(`
-        SELECT target_pct FROM profile_allocations WHERE profile_id = ? AND bucket_id = ?
-      `).get(activeProfile.id, b.id) as any;
+        SELECT target_pct FROM profile_allocations WHERE user_id = ? AND profile_id = ? AND bucket_id = ?
+      `).get(userId, activeProfile.id, b.id) as any;
       targetPct = alloc?.target_pct ?? 0;
     }
 
@@ -99,48 +101,44 @@ router.get('/summary', (_req, res) => {
   res.json(summary);
 });
 
-// Portfolio value over time — reconstructed from transactions + price history
-router.get('/history', (_req, res) => {
-  // Get all price dates to build timeline
+router.get('/history', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const priceDates = db.prepare(`
-    SELECT DISTINCT date FROM price_history ORDER BY date ASC
-  `).all() as any[];
+    SELECT DISTINCT date FROM price_history WHERE user_id = ? ORDER BY date ASC
+  `).all(userId) as any[];
 
-  // Also include transaction dates for cost-basis tracking
   const txnDates = db.prepare(`
-    SELECT DISTINCT date FROM transactions ORDER BY date ASC
-  `).all() as any[];
+    SELECT DISTINCT date FROM transactions WHERE user_id = ? ORDER BY date ASC
+  `).all(userId) as any[];
 
   const allDates = [...new Set([
     ...priceDates.map((p: any) => p.date),
     ...txnDates.map((t: any) => t.date),
   ])].sort();
 
-  const funds = db.prepare('SELECT id, ticker, bucket_id FROM funds').all() as any[];
+  const funds = db.prepare('SELECT id, ticker, bucket_id FROM funds WHERE user_id = ?').all(userId) as any[];
 
   const history = allDates.map(date => {
     let totalValue = 0;
     let totalInvested = 0;
 
     for (const fund of funds) {
-      // Holdings as of this date
       const buyQty = db.prepare(`
-        SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'buy' AND date <= ?
-      `).get(fund.id, date) as any;
+        SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'buy' AND date <= ?
+      `).get(userId, fund.id, date) as any;
       const sellQty = db.prepare(`
-        SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'sell' AND date <= ?
-      `).get(fund.id, date) as any;
+        SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'sell' AND date <= ?
+      `).get(userId, fund.id, date) as any;
       const invested = db.prepare(`
-        SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE fund_id = ? AND date <= ?
-      `).get(fund.id, date) as any;
+        SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND date <= ?
+      `).get(userId, fund.id, date) as any;
 
       const qty = buyQty.total - sellQty.total;
       if (qty <= 0) continue;
 
-      // Best available price on or before this date
       const price = db.prepare(`
-        SELECT price FROM price_history WHERE fund_id = ? AND date <= ? ORDER BY date DESC LIMIT 1
-      `).get(fund.id, date) as any;
+        SELECT price FROM price_history WHERE user_id = ? AND fund_id = ? AND date <= ? ORDER BY date DESC LIMIT 1
+      `).get(userId, fund.id, date) as any;
 
       if (price) {
         totalValue += qty * price.price;
@@ -159,39 +157,38 @@ router.get('/history', (_req, res) => {
   res.json(history);
 });
 
-// Per-fund detailed performance over time
-router.get('/fund/:id/performance', (req, res) => {
+router.get('/fund/:id/performance', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const fundId = req.params.id;
 
-  const fund = db.prepare('SELECT * FROM funds WHERE id = ?').get(fundId) as any;
+  const fund = db.prepare('SELECT * FROM funds WHERE id = ? AND user_id = ?').get(fundId, userId) as any;
   if (!fund) return res.status(404).json({ error: 'Fund not found' });
 
   const transactions = db.prepare(`
-    SELECT * FROM transactions WHERE fund_id = ? ORDER BY date ASC
-  `).all(fundId) as any[];
+    SELECT * FROM transactions WHERE user_id = ? AND fund_id = ? ORDER BY date ASC
+  `).all(userId, fundId) as any[];
 
   const distributions = db.prepare(`
-    SELECT * FROM distributions WHERE fund_id = ? ORDER BY date ASC
-  `).all(fundId) as any[];
+    SELECT * FROM distributions WHERE user_id = ? AND fund_id = ? ORDER BY date ASC
+  `).all(userId, fundId) as any[];
 
   const prices = db.prepare(`
-    SELECT * FROM price_history WHERE fund_id = ? ORDER BY date ASC
-  `).all(fundId) as any[];
+    SELECT * FROM price_history WHERE user_id = ? AND fund_id = ? ORDER BY date ASC
+  `).all(userId, fundId) as any[];
 
-  // Build timeline: at each price point, calculate holdings and value
   const timeline = prices.map(p => {
     const buyQty = db.prepare(`
-      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'buy' AND date <= ?
-    `).get(fundId, p.date) as any;
+      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'buy' AND date <= ?
+    `).get(userId, fundId, p.date) as any;
     const sellQty = db.prepare(`
-      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'sell' AND date <= ?
-    `).get(fundId, p.date) as any;
+      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'sell' AND date <= ?
+    `).get(userId, fundId, p.date) as any;
     const invested = db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE fund_id = ? AND date <= ?
-    `).get(fundId, p.date) as any;
+      SELECT COALESCE(SUM(amount), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND date <= ?
+    `).get(userId, fundId, p.date) as any;
     const divsToDate = db.prepare(`
-      SELECT COALESCE(SUM(amount), 0) as total FROM distributions WHERE fund_id = ? AND date <= ?
-    `).get(fundId, p.date) as any;
+      SELECT COALESCE(SUM(amount), 0) as total FROM distributions WHERE user_id = ? AND fund_id = ? AND date <= ?
+    `).get(userId, fundId, p.date) as any;
 
     const qty = buyQty.total - sellQty.total;
     const value = qty * p.price;
@@ -219,13 +216,14 @@ router.get('/fund/:id/performance', (req, res) => {
   });
 });
 
-router.get('/rebalance', (req, res) => {
+router.get('/rebalance', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const profileId = req.query.profile_id;
   const newCapital = parseFloat(req.query.new_capital as string) || 0;
 
   const profile = profileId
-    ? db.prepare('SELECT * FROM profiles WHERE id = ?').get(profileId) as any
-    : db.prepare('SELECT * FROM profiles WHERE is_active = 1').get() as any;
+    ? db.prepare('SELECT * FROM profiles WHERE user_id = ? AND id = ?').get(userId, profileId) as any
+    : db.prepare('SELECT * FROM profiles WHERE user_id = ? AND is_active = 1').get(userId) as any;
 
   if (!profile) {
     return res.status(400).json({ error: 'No profile selected or active' });
@@ -234,20 +232,26 @@ router.get('/rebalance', (req, res) => {
   const allocations = db.prepare(`
     SELECT pa.*, b.name as bucket_name
     FROM profile_allocations pa
-    JOIN buckets b ON pa.bucket_id = b.id
-    WHERE pa.profile_id = ?
-  `).all(profile.id) as any[];
+    JOIN buckets b ON pa.bucket_id = b.id AND b.user_id = pa.user_id
+    WHERE pa.user_id = ? AND pa.profile_id = ?
+  `).all(userId, profile.id) as any[];
 
-  const funds = db.prepare('SELECT * FROM funds').all() as any[];
+  const funds = db.prepare('SELECT * FROM funds WHERE user_id = ?').all(userId) as any[];
   const bucketValues: Record<number, number> = {};
 
   for (const f of funds) {
-    const buyQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'buy'`).get(f.id) as any;
-    const sellQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'sell'`).get(f.id) as any;
+    const buyQty = db.prepare(`
+      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'buy'
+    `).get(userId, f.id) as any;
+    const sellQty = db.prepare(`
+      SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE user_id = ? AND fund_id = ? AND type = 'sell'
+    `).get(userId, f.id) as any;
     const qty = buyQty.total - sellQty.total;
     if (qty <= 0) continue;
 
-    const price = db.prepare(`SELECT price FROM price_history WHERE fund_id = ? ORDER BY date DESC LIMIT 1`).get(f.id) as any;
+    const price = db.prepare(`
+      SELECT price FROM price_history WHERE user_id = ? AND fund_id = ? ORDER BY date DESC LIMIT 1
+    `).get(userId, f.id) as any;
     if (!price) continue;
 
     const value = qty * price.price;

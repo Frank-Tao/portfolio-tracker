@@ -61,15 +61,15 @@ async function fetchASXHistoricalPrices(
   return prices;
 }
 
-export async function refreshPrices(): Promise<{ updated: string[]; errors: string[] }> {
-  const funds = db.prepare('SELECT * FROM funds').all() as any[];
+export async function refreshPrices(userId: number): Promise<{ updated: string[]; errors: string[] }> {
+  const funds = db.prepare('SELECT * FROM funds WHERE user_id = ?').all(userId) as any[];
   const updated: string[] = [];
   const errors: string[] = [];
   const today = new Date().toISOString().split('T')[0];
 
   const existing = db.prepare(
-    'SELECT fund_id FROM price_history WHERE date = ?'
-  ).all(today) as any[];
+    'SELECT fund_id FROM price_history WHERE user_id = ? AND date = ?'
+  ).all(userId, today) as any[];
   const alreadyFetched = new Set(existing.map((e: any) => e.fund_id));
 
   for (const fund of funds) {
@@ -86,9 +86,9 @@ export async function refreshPrices(): Promise<{ updated: string[]; errors: stri
         const price = await fetchASXPrice(fund.ticker);
         if (price) {
           db.prepare(`
-            INSERT OR REPLACE INTO price_history (fund_id, date, price, source)
-            VALUES (?, ?, ?, 'yahoo')
-          `).run(fund.id, today, price);
+            INSERT OR REPLACE INTO price_history (user_id, fund_id, date, price, source)
+            VALUES (?, ?, ?, ?, 'yahoo')
+          `).run(userId, fund.id, today, price);
           updated.push(`${fund.ticker}: $${price.toFixed(2)}`);
           success = true;
         } else {
@@ -112,33 +112,31 @@ export async function refreshPrices(): Promise<{ updated: string[]; errors: stri
   return { updated, errors };
 }
 
-export async function refreshHistoricalMonthEnd(): Promise<{
+export async function refreshHistoricalMonthEnd(userId: number): Promise<{
   updated: { ticker: string; months_added: number }[];
   errors: string[];
 }> {
-  const funds = db.prepare('SELECT * FROM funds').all() as any[];
+  const funds = db.prepare('SELECT * FROM funds WHERE user_id = ?').all(userId) as any[];
   const updated: { ticker: string; months_added: number }[] = [];
   const errors: string[] = [];
 
-  const firstTxn = db.prepare('SELECT MIN(date) as first_date FROM transactions').get() as any;
+  const firstTxn = db.prepare('SELECT MIN(date) as first_date FROM transactions WHERE user_id = ?').get(userId) as any;
   if (!firstTxn?.first_date) {
     return { updated, errors: ['No transactions found'] };
   }
 
-  const startDate = new Date(firstTxn.first_date);
-  startDate.setDate(1);
   const today = new Date();
 
   for (const fund of funds) {
     const fundFirstTxn = db.prepare(
-      'SELECT MIN(date) as first_date FROM transactions WHERE fund_id = ?'
-    ).get(fund.id) as any;
+      'SELECT MIN(date) as first_date FROM transactions WHERE user_id = ? AND fund_id = ?'
+    ).get(userId, fund.id) as any;
     if (!fundFirstTxn?.first_date) continue;
 
     const monthEnds = getMonthEnds(new Date(fundFirstTxn.first_date), today);
 
     const existingDates = new Set(
-      (db.prepare('SELECT date FROM price_history WHERE fund_id = ?').all(fund.id) as any[])
+      (db.prepare('SELECT date FROM price_history WHERE user_id = ? AND fund_id = ?').all(userId, fund.id) as any[])
         .map((r: any) => r.date)
     );
 
@@ -166,15 +164,15 @@ export async function refreshHistoricalMonthEnd(): Promise<{
         }
 
         const insert = db.prepare(`
-          INSERT OR IGNORE INTO price_history (fund_id, date, price, source)
-          VALUES (?, ?, ?, 'yahoo-historical')
+          INSERT OR IGNORE INTO price_history (user_id, fund_id, date, price, source)
+          VALUES (?, ?, ?, ?, 'yahoo-historical')
         `);
 
         let added = 0;
         for (const monthEnd of missingMonthEnds) {
           const price = findClosestPrice(historicalPrices, monthEnd);
           if (price) {
-            insert.run(fund.id, monthEnd, price);
+            insert.run(userId, fund.id, monthEnd, price);
             added++;
           }
         }
@@ -238,13 +236,13 @@ function findClosestPrice(
   return closest?.close ?? null;
 }
 
-export async function manualPriceUpdate(ticker: string, price: number, date?: string): Promise<void> {
-  const fund = db.prepare('SELECT id FROM funds WHERE ticker = ?').get(ticker.toUpperCase()) as any;
+export async function manualPriceUpdate(userId: number, ticker: string, price: number, date?: string): Promise<void> {
+  const fund = db.prepare('SELECT id FROM funds WHERE ticker = ? AND user_id = ?').get(ticker.toUpperCase(), userId) as any;
   if (!fund) throw new Error(`Fund ${ticker} not found`);
 
   const priceDate = date || new Date().toISOString().split('T')[0];
   db.prepare(`
-    INSERT OR REPLACE INTO price_history (fund_id, date, price, source)
-    VALUES (?, ?, ?, 'manual')
-  `).run(fund.id, priceDate, price);
+    INSERT OR REPLACE INTO price_history (user_id, fund_id, date, price, source)
+    VALUES (?, ?, ?, ?, 'manual')
+  `).run(userId, fund.id, priceDate, price);
 }

@@ -246,6 +246,7 @@ export interface User {
   id: number;
   email: string;
   name: string | null;
+  is_admin: number;
   created_at?: string;
   last_login?: string;
 }
@@ -255,4 +256,34 @@ export interface AuthResponse {
   message?: string;
   user?: User;
   dev_token?: string;
+}
+
+export interface AdminUserSummary {
+  id: number;
+  email: string;
+  name: string | null;
+  is_admin: number;
+  created_at: string;
+  last_login: string | null;
+  funds_count: number;
+  transactions_count: number;
+  distributions_count: number;
+  cash_movements_count: number;
+  snapshots_count: number;
+  last_activity_at: string | null;
+}
+
+export interface ActivityLogItem {
+  id: number;
+  actor_user_id: number | null;
+  actor_email: string | null;
+  actor_name: string | null;
+  actor_is_admin: number | null;
+  method: string;
+  path: string;
+  status_code: number;
+  duration_ms: number;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: string;
 }

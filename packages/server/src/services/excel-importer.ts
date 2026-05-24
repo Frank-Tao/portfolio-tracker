@@ -23,7 +23,7 @@ const FUND_NAMES: Record<string, string> = {
   'Cash Fund': 'Vanguard Cash Plus Fund',
 };
 
-export function importExcelFile(filePath: string): ImportResult {
+export function importExcelFile(userId: number, filePath: string): ImportResult {
   const workbook = XLSX.readFile(filePath, { cellDates: true });
   const result: ImportResult = {
     transactions_added: 0,
@@ -36,7 +36,7 @@ export function importExcelFile(filePath: string): ImportResult {
   for (const sheetName of workbook.SheetNames) {
     if (SKIP_SHEETS.includes(sheetName)) continue;
 
-    const fundId = getOrCreateFund(sheetName);
+    const fundId = getOrCreateFund(userId, sheetName);
     if (!fundId) {
       result.errors.push(`Could not resolve fund for sheet "${sheetName}"`);
       continue;
@@ -45,57 +45,57 @@ export function importExcelFile(filePath: string): ImportResult {
     const sheet = workbook.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null }) as any[][];
 
-    importTransactions(data, fundId, sheetName, result);
-    importDistributions(data, fundId, sheetName, result);
+    importTransactions(userId, data, fundId, sheetName, result);
+    importDistributions(userId, data, fundId, sheetName, result);
   }
 
   if (workbook.SheetNames.includes('Summary')) {
     const summarySheet = workbook.Sheets['Summary'];
     const summaryData = XLSX.utils.sheet_to_json(summarySheet, { header: 1, defval: null }) as any[][];
-    importCashMovements(summaryData, result);
+    importCashMovements(userId, summaryData, result);
   }
 
   return result;
 }
 
-function getOrCreateFund(sheetName: string): number | null {
+function getOrCreateFund(userId: number, sheetName: string): number | null {
   const ticker = sheetName.toUpperCase().replace(/\s+/g, '');
 
-  const existing = db.prepare('SELECT id FROM funds WHERE ticker = ?').get(ticker) as any;
+  const existing = db.prepare('SELECT id FROM funds WHERE ticker = ? AND user_id = ?').get(ticker, userId) as any;
   if (existing) return existing.id;
 
   const name = FUND_NAMES[sheetName] || FUND_NAMES[ticker] || `Vanguard ${sheetName}`;
 
   try {
     const result = db.prepare(`
-      INSERT INTO funds (ticker, name, expense_ratio, bucket_id)
-      VALUES (?, ?, NULL, NULL)
-    `).run(ticker, name);
+      INSERT INTO funds (user_id, ticker, name, expense_ratio, bucket_id)
+      VALUES (?, ?, ?, NULL, NULL)
+    `).run(userId, ticker, name);
     return result.lastInsertRowid as number;
   } catch {
-    const retry = db.prepare('SELECT id FROM funds WHERE ticker = ?').get(ticker) as any;
+    const retry = db.prepare('SELECT id FROM funds WHERE ticker = ? AND user_id = ?').get(ticker, userId) as any;
     return retry?.id ?? null;
   }
 }
 
-function importTransactions(data: any[][], fundId: number, ticker: string, result: ImportResult): void {
+function importTransactions(userId: number, data: any[][], fundId: number, ticker: string, result: ImportResult): void {
   const checkDup = db.prepare(`
-    SELECT id FROM transactions WHERE fund_id = ? AND date = ? AND quantity = ?
+    SELECT id FROM transactions WHERE user_id = ? AND fund_id = ? AND date = ? AND quantity = ?
   `);
   const insert = db.prepare(`
-    INSERT INTO transactions (fund_id, date, type, quantity, price, amount, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO transactions (user_id, fund_id, date, type, quantity, price, amount, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertPrice = db.prepare(`
-    INSERT OR IGNORE INTO price_history (fund_id, date, price, source)
-    VALUES (?, ?, ?, 'excel')
+    INSERT OR IGNORE INTO price_history (user_id, fund_id, date, price, source)
+    VALUES (?, ?, ?, ?, 'excel')
   `);
   const insertCash = db.prepare(`
-    INSERT INTO cash_movements (date, type, amount, notes, related_fund_id)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO cash_movements (user_id, date, type, amount, notes, related_fund_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
   const checkCashDup = db.prepare(`
-    SELECT id FROM cash_movements WHERE date = ? AND amount = ? AND related_fund_id = ? AND type = ?
+    SELECT id FROM cash_movements WHERE user_id = ? AND date = ? AND amount = ? AND related_fund_id = ? AND type = ?
   `);
 
   for (let i = TRANSACTION_DATA_START; i < data.length; i++) {
@@ -107,7 +107,7 @@ function importTransactions(data: any[][], fundId: number, ticker: string, resul
 
     const price = parseFloat(row[1]);
     if (!isNaN(price) && price > 0) {
-      insertPrice.run(fundId, date, price);
+      insertPrice.run(userId, fundId, date, price);
     }
 
     const qty = parseFloat(row[2]);
@@ -119,23 +119,23 @@ function importTransactions(data: any[][], fundId: number, ticker: string, resul
     const type = qty > 0 ? 'buy' : 'sell';
     const absQty = Math.abs(qty);
 
-    const existing = checkDup.get(fundId, date, absQty);
+    const existing = checkDup.get(userId, fundId, date, absQty);
     if (existing) {
       result.duplicates_skipped++;
       continue;
     }
 
     try {
-      insert.run(fundId, date, type, absQty, price, amount, row[13] ?? null);
+      insert.run(userId, fundId, date, type, absQty, price, amount, row[13] ?? null);
       result.transactions_added++;
 
       const cashType = type === 'buy' ? 'buy' : 'sell';
       const cashAmount = type === 'buy' ? -Math.abs(amount) : Math.abs(amount);
       const cashNote = `${type === 'buy' ? 'Buy' : 'Sell'} ${absQty} ${ticker} @ $${price.toFixed(2)}`;
 
-      const existingCash = checkCashDup.get(date, cashAmount, fundId, cashType);
+      const existingCash = checkCashDup.get(userId, date, cashAmount, fundId, cashType);
       if (!existingCash) {
-        insertCash.run(date, cashType, cashAmount, cashNote, fundId);
+        insertCash.run(userId, date, cashType, cashAmount, cashNote, fundId);
       }
     } catch (err: any) {
       result.errors.push(`Transaction row ${i}: ${err.message}`);
@@ -143,20 +143,20 @@ function importTransactions(data: any[][], fundId: number, ticker: string, resul
   }
 }
 
-function importDistributions(data: any[][], fundId: number, ticker: string, result: ImportResult): void {
+function importDistributions(userId: number, data: any[][], fundId: number, ticker: string, result: ImportResult): void {
   const checkDup = db.prepare(`
-    SELECT id FROM distributions WHERE fund_id = ? AND date = ? AND amount = ?
+    SELECT id FROM distributions WHERE user_id = ? AND fund_id = ? AND date = ? AND amount = ?
   `);
   const insert = db.prepare(`
-    INSERT INTO distributions (fund_id, date, amount, label)
-    VALUES (?, ?, ?, ?)
-  `);
-  const insertCash = db.prepare(`
-    INSERT INTO cash_movements (date, type, amount, notes, related_fund_id)
+    INSERT INTO distributions (user_id, fund_id, date, amount, label)
     VALUES (?, ?, ?, ?, ?)
   `);
+  const insertCash = db.prepare(`
+    INSERT INTO cash_movements (user_id, date, type, amount, notes, related_fund_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
   const checkCashDup = db.prepare(`
-    SELECT id FROM cash_movements WHERE date = ? AND amount = ? AND related_fund_id = ? AND type = 'dividend'
+    SELECT id FROM cash_movements WHERE user_id = ? AND date = ? AND amount = ? AND related_fund_id = ? AND type = 'dividend'
   `);
 
   for (let i = TRANSACTION_DATA_START; i < data.length; i++) {
@@ -175,20 +175,20 @@ function importDistributions(data: any[][], fundId: number, ticker: string, resu
       continue;
     }
 
-    const existing = checkDup.get(fundId, date, amount);
+    const existing = checkDup.get(userId, fundId, date, amount);
     if (existing) {
       result.duplicates_skipped++;
       continue;
     }
 
     try {
-      insert.run(fundId, date, amount, label);
+      insert.run(userId, fundId, date, amount, label);
       result.distributions_added++;
 
       const cashNote = `Dividend from ${ticker}: $${amount.toFixed(2)}`;
-      const existingCash = checkCashDup.get(date, amount, fundId);
+      const existingCash = checkCashDup.get(userId, date, amount, fundId);
       if (!existingCash) {
-        insertCash.run(date, 'dividend', amount, cashNote, fundId);
+        insertCash.run(userId, date, 'dividend', amount, cashNote, fundId);
       }
     } catch (err: any) {
       result.errors.push(`Distribution row ${i}: ${err.message}`);
@@ -196,13 +196,13 @@ function importDistributions(data: any[][], fundId: number, ticker: string, resu
   }
 }
 
-function importCashMovements(data: any[][], result: ImportResult): void {
+function importCashMovements(userId: number, data: any[][], result: ImportResult): void {
   const checkDup = db.prepare(`
-    SELECT id FROM cash_movements WHERE date = ? AND amount = ? AND type IN ('deposit', 'withdrawal')
+    SELECT id FROM cash_movements WHERE user_id = ? AND date = ? AND amount = ? AND type IN ('deposit', 'withdrawal')
   `);
   const insert = db.prepare(`
-    INSERT INTO cash_movements (date, type, amount, notes, related_fund_id)
-    VALUES (?, ?, ?, ?, NULL)
+    INSERT INTO cash_movements (user_id, date, type, amount, notes, related_fund_id)
+    VALUES (?, ?, ?, ?, ?, NULL)
   `);
 
   for (let i = 3; i < data.length; i++) {
@@ -215,7 +215,7 @@ function importCashMovements(data: any[][], result: ImportResult): void {
     const amount = parseFloat(row[9]);
     if (isNaN(amount)) continue;
 
-    const existing = checkDup.get(date, amount);
+    const existing = checkDup.get(userId, date, amount);
     if (existing) {
       result.duplicates_skipped++;
       continue;
@@ -224,7 +224,7 @@ function importCashMovements(data: any[][], result: ImportResult): void {
     const type = amount >= 0 ? 'deposit' : 'withdrawal';
 
     try {
-      insert.run(date, type, amount, null);
+      insert.run(userId, date, type, amount, null);
       result.cash_movements_added++;
     } catch (err: any) {
       result.errors.push(`Cash movement row ${i}: ${err.message}`);

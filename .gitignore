@@ -3,3 +3,10 @@ dist/
 *.db
 .env
 .DS_Store
+.memory
+
+packages/client/vercel.json
+packages/client/.vercel/
+
+# Local/raw investment workbooks are not safe to commit; use sanitized JSON demo data instead.
+*.xlsx

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 
 function Profile() {
-  const { user, logout, updateProfile } = useAuth();
+  const { user, updateProfile } = useAuth();
   const [name, setName] = useState(user?.name || '');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -62,16 +62,6 @@ function Profile() {
         {saved && <p className="text-sm text-green-600 mt-2">Profile updated</p>}
       </div>
 
-      <div className="bg-white rounded-lg border border-gray-200 p-6 max-w-lg">
-        <h2 className="text-lg font-semibold text-gray-900 mb-2">Session</h2>
-        <p className="text-sm text-gray-500 mb-4">Your session will remain active for 30 days on this device.</p>
-        <button
-          onClick={logout}
-          className="px-4 py-2 text-sm text-red-600 border border-red-300 rounded-md hover:bg-red-50"
-        >
-          Sign Out
-        </button>
-      </div>
     </div>
   );
 }

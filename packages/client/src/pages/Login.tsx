@@ -24,8 +24,8 @@ function Login() {
       } else {
         setError(result.message || 'Failed to send code');
       }
-    } catch {
-      setError('Network error');
+    } catch (err: any) {
+      setError(err?.message || 'Network error');
     } finally {
       setSending(false);
     }
@@ -40,8 +40,8 @@ function Login() {
       if (!result.success) {
         setError(result.error || 'Invalid code');
       }
-    } catch {
-      setError('Network error');
+    } catch (err: any) {
+      setError(err?.message || 'Network error');
     } finally {
       setSending(false);
     }

@@ -1,25 +1,26 @@
 import { Router } from 'express';
 import db from '../db/connection.js';
 import type { PerformanceMetrics, MonthlyReturn } from '@portfolio/shared';
+import type { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
-router.get('/', (_req, res) => {
-  const metrics = calculatePerformance();
+router.get('/', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
+  const metrics = calculatePerformance(userId);
   res.json(metrics);
 });
 
-function calculatePerformance(): PerformanceMetrics {
-  const priceDates = db.prepare('SELECT DISTINCT date FROM price_history ORDER BY date ASC').all() as any[];
+function calculatePerformance(userId: number): PerformanceMetrics {
+  const priceDates = db.prepare('SELECT DISTINCT date FROM price_history WHERE user_id = ? ORDER BY date ASC').all(userId) as any[];
   if (priceDates.length < 2) {
     return emptyMetrics();
   }
 
-  const funds = db.prepare('SELECT id FROM funds').all() as any[];
+  const funds = db.prepare('SELECT id FROM funds WHERE user_id = ?').all(userId) as any[];
   const allMonths = getMonthBoundaries(priceDates.map(p => p.date));
 
   const monthlyReturns: MonthlyReturn[] = [];
-  let prevValue = 0;
 
   for (const month of allMonths) {
     const { startDate, endDate, label } = month;
@@ -29,11 +30,11 @@ function calculatePerformance(): PerformanceMetrics {
     let netFlows = 0;
 
     for (const fund of funds) {
-      const startQty = getQtyAtDate(fund.id, startDate);
-      const endQty = getQtyAtDate(fund.id, endDate);
+      const startQty = getQtyAtDate(userId, fund.id, startDate);
+      const endQty = getQtyAtDate(userId, fund.id, endDate);
 
-      const startPrice = getPriceAtDate(fund.id, startDate);
-      const endPrice = getPriceAtDate(fund.id, endDate);
+      const startPrice = getPriceAtDate(userId, fund.id, startDate);
+      const endPrice = getPriceAtDate(userId, fund.id, endDate);
 
       startValue += startQty * startPrice;
       endValue += endQty * endPrice;
@@ -41,16 +42,16 @@ function calculatePerformance(): PerformanceMetrics {
       const flows = db.prepare(`
         SELECT COALESCE(SUM(amount), 0) as total
         FROM transactions
-        WHERE fund_id = ? AND date > ? AND date <= ?
-      `).get(fund.id, startDate, endDate) as any;
+        WHERE user_id = ? AND fund_id = ? AND date > ? AND date <= ?
+      `).get(userId, fund.id, startDate, endDate) as any;
       netFlows += flows.total;
     }
 
     const cashFlowsInMonth = db.prepare(`
       SELECT COALESCE(SUM(amount), 0) as total
       FROM cash_movements
-      WHERE date > ? AND date <= ?
-    `).get(startDate, endDate) as any;
+      WHERE user_id = ? AND date > ? AND date <= ?
+    `).get(userId, startDate, endDate) as any;
     netFlows += cashFlowsInMonth.total;
 
     const denominator = startValue + netFlows / 2;
@@ -63,18 +64,13 @@ function calculatePerformance(): PerformanceMetrics {
       net_flows: netFlows,
       return_pct: returnPct,
     });
-
-    prevValue = endValue;
   }
 
   const validReturns = monthlyReturns.filter(m => m.start_value > 0 || m.end_value > 0);
-
   const twr = validReturns.reduce((acc, m) => acc * (1 + m.return_pct), 1) - 1;
-
   const years = validReturns.length / 12;
   const annualizedReturn = years > 0 ? Math.pow(1 + twr, 1 / years) - 1 : 0;
-
-  const mwr = calculateXIRR(funds);
+  const mwr = calculateXIRR(userId, funds);
 
   let peak = 0;
   let maxDrawdown = 0;
@@ -115,14 +111,28 @@ function calculatePerformance(): PerformanceMetrics {
   };
 }
 
-function getQtyAtDate(fundId: number, date: string): number {
-  const buyQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'buy' AND date <= ?`).get(fundId, date) as any;
-  const sellQty = db.prepare(`SELECT COALESCE(SUM(quantity), 0) as total FROM transactions WHERE fund_id = ? AND type = 'sell' AND date <= ?`).get(fundId, date) as any;
+function getQtyAtDate(userId: number, fundId: number, date: string): number {
+  const buyQty = db.prepare(`
+    SELECT COALESCE(SUM(quantity), 0) as total
+    FROM transactions
+    WHERE user_id = ? AND fund_id = ? AND type = 'buy' AND date <= ?
+  `).get(userId, fundId, date) as any;
+  const sellQty = db.prepare(`
+    SELECT COALESCE(SUM(quantity), 0) as total
+    FROM transactions
+    WHERE user_id = ? AND fund_id = ? AND type = 'sell' AND date <= ?
+  `).get(userId, fundId, date) as any;
   return buyQty.total - sellQty.total;
 }
 
-function getPriceAtDate(fundId: number, date: string): number {
-  const price = db.prepare(`SELECT price FROM price_history WHERE fund_id = ? AND date <= ? ORDER BY date DESC LIMIT 1`).get(fundId, date) as any;
+function getPriceAtDate(userId: number, fundId: number, date: string): number {
+  const price = db.prepare(`
+    SELECT price
+    FROM price_history
+    WHERE user_id = ? AND fund_id = ? AND date <= ?
+    ORDER BY date DESC
+    LIMIT 1
+  `).get(userId, fundId, date) as any;
   return price?.price ?? 0;
 }
 
@@ -153,10 +163,10 @@ function getMonthBoundaries(dates: string[]): { startDate: string; endDate: stri
   return months;
 }
 
-function calculateXIRR(funds: any[]): number {
+function calculateXIRR(userId: number, funds: any[]): number {
   const cashflows: { date: Date; amount: number }[] = [];
 
-  const transactions = db.prepare('SELECT date, amount, type FROM transactions ORDER BY date').all() as any[];
+  const transactions = db.prepare('SELECT date, amount, type FROM transactions WHERE user_id = ? ORDER BY date').all(userId) as any[];
   for (const t of transactions) {
     cashflows.push({
       date: new Date(t.date),
@@ -164,30 +174,30 @@ function calculateXIRR(funds: any[]): number {
     });
   }
 
-  const cashMovements = db.prepare('SELECT date, amount FROM cash_movements ORDER BY date').all() as any[];
+  const cashMovements = db.prepare('SELECT date, amount FROM cash_movements WHERE user_id = ? ORDER BY date').all(userId) as any[];
   for (const c of cashMovements) {
     cashflows.push({ date: new Date(c.date), amount: -c.amount });
   }
 
-  const distributions = db.prepare('SELECT date, amount FROM distributions ORDER BY date').all() as any[];
+  const distributions = db.prepare('SELECT date, amount FROM distributions WHERE user_id = ? ORDER BY date').all(userId) as any[];
   for (const d of distributions) {
     cashflows.push({ date: new Date(d.date), amount: d.amount });
   }
 
   let currentValue = 0;
+  const today = new Date().toISOString().split('T')[0];
   for (const fund of funds) {
-    const qty = getQtyAtDate(fund.id, new Date().toISOString().split('T')[0]);
-    const price = getPriceAtDate(fund.id, new Date().toISOString().split('T')[0]);
+    const qty = getQtyAtDate(userId, fund.id, today);
+    const price = getPriceAtDate(userId, fund.id, today);
     currentValue += qty * price;
   }
 
-  const cashBalance = (db.prepare('SELECT COALESCE(SUM(amount), 0) as balance FROM cash_movements').get() as any).balance;
+  const cashBalance = (db.prepare('SELECT COALESCE(SUM(amount), 0) as balance FROM cash_movements WHERE user_id = ?').get(userId) as any).balance;
   currentValue += cashBalance;
 
   if (cashflows.length === 0 || currentValue === 0) return 0;
 
   cashflows.push({ date: new Date(), amount: currentValue });
-
   return xirr(cashflows);
 }
 

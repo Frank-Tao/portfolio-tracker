@@ -2,8 +2,15 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import db from '../db/connection.js';
+import { ensureTenantBaseData } from '../db/connection.js';
 
 const router = Router();
+
+function isAdminEmail(email: string): boolean {
+  const raw = process.env.PORTFOLIO_ADMIN_EMAILS || '';
+  const allowlist = raw.split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+  return allowlist.includes(email.toLowerCase());
+}
 
 function generateToken(): string {
   return crypto.randomInt(100000, 999999).toString();
@@ -102,12 +109,19 @@ router.post('/verify-token', (req: Request, res: Response) => {
   // Create or get user
   let user = db.prepare("SELECT * FROM users WHERE email = ?").get(normalizedEmail) as any;
   if (!user) {
-    db.prepare("INSERT INTO users (email) VALUES (?)").run(normalizedEmail);
+    db.prepare("INSERT INTO users (email, is_admin) VALUES (?, ?)").run(normalizedEmail, isAdminEmail(normalizedEmail) ? 1 : 0);
     user = db.prepare("SELECT * FROM users WHERE email = ?").get(normalizedEmail) as any;
+  } else {
+    const shouldBeAdmin = isAdminEmail(normalizedEmail) ? 1 : 0;
+    if ((user.is_admin ?? 0) !== shouldBeAdmin) {
+      db.prepare("UPDATE users SET is_admin = ? WHERE id = ?").run(shouldBeAdmin, user.id);
+      user.is_admin = shouldBeAdmin;
+    }
   }
 
   // Update last login
   db.prepare("UPDATE users SET last_login = ? WHERE id = ?").run(now, user.id);
+  ensureTenantBaseData(user.id);
 
   // Create session (30 days)
   const sessionToken = generateSessionToken();
@@ -125,7 +139,7 @@ router.post('/verify-token', (req: Request, res: Response) => {
 
   res.json({
     success: true,
-    user: { id: user.id, email: user.email, name: user.name },
+    user: { id: user.id, email: user.email, name: user.name, is_admin: user.is_admin ?? 0 },
   });
 });
 
@@ -138,7 +152,7 @@ router.get('/me', (req: Request, res: Response) => {
 
   const now = new Date().toISOString();
   const session = db.prepare(
-    "SELECT s.*, u.id as user_id, u.email, u.name, u.created_at as user_created_at, u.last_login FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.session_token = ? AND s.expires_at > ?"
+    "SELECT s.*, u.id as user_id, u.email, u.name, u.is_admin, u.created_at as user_created_at, u.last_login FROM sessions s JOIN users u ON s.user_id = u.id WHERE s.session_token = ? AND s.expires_at > ?"
   ).get(sessionToken, now) as any;
 
   if (!session) {
@@ -147,7 +161,14 @@ router.get('/me', (req: Request, res: Response) => {
   }
 
   res.json({
-    user: { id: session.user_id, email: session.email, name: session.name, created_at: session.user_created_at, last_login: session.last_login },
+    user: {
+      id: session.user_id,
+      email: session.email,
+      name: session.name,
+      is_admin: session.is_admin ?? 0,
+      created_at: session.user_created_at,
+      last_login: session.last_login,
+    },
   });
 });
 
@@ -182,7 +203,7 @@ router.put('/profile', (req: Request, res: Response) => {
     db.prepare("UPDATE users SET name = ? WHERE id = ?").run(name, session.user_id);
   }
 
-  const user = db.prepare("SELECT id, email, name, created_at, last_login FROM users WHERE id = ?").get(session.user_id) as any;
+  const user = db.prepare("SELECT id, email, name, is_admin, created_at, last_login FROM users WHERE id = ?").get(session.user_id) as any;
   res.json({ user });
 });
 

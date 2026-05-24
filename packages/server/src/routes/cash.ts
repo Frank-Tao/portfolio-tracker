@@ -1,19 +1,21 @@
 import { Router } from 'express';
 import db from '../db/connection.js';
 import type { CashSummary } from '@portfolio/shared';
+import type { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
-router.get('/', (req, res) => {
+router.get('/', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const { type, from, to } = req.query;
 
   let sql = `
     SELECT cm.*, f.ticker
     FROM cash_movements cm
-    LEFT JOIN funds f ON cm.related_fund_id = f.id
-    WHERE 1=1
+    LEFT JOIN funds f ON cm.related_fund_id = f.id AND f.user_id = cm.user_id
+    WHERE cm.user_id = ?
   `;
-  const params: any[] = [];
+  const params: any[] = [userId];
 
   if (type) { sql += ' AND cm.type = ?'; params.push(type); }
   if (from) { sql += ' AND cm.date >= ?'; params.push(from); }
@@ -22,7 +24,7 @@ router.get('/', (req, res) => {
 
   const movements = db.prepare(sql).all(...params) as any[];
 
-  const balance = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements').get() as any;
+  const balance = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE user_id = ?').get(userId) as any;
 
   const totals = db.prepare(`
     SELECT
@@ -32,7 +34,8 @@ router.get('/', (req, res) => {
       COALESCE(SUM(CASE WHEN type = 'buy' THEN ABS(amount) ELSE 0 END), 0) as total_buys,
       COALESCE(SUM(CASE WHEN type = 'sell' THEN amount ELSE 0 END), 0) as total_sells
     FROM cash_movements
-  `).get() as any;
+    WHERE user_id = ?
+  `).get(userId) as any;
 
   const summary: CashSummary = {
     balance: balance.total,
@@ -47,7 +50,8 @@ router.get('/', (req, res) => {
   res.json(summary);
 });
 
-router.post('/', (req, res) => {
+router.post('/', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
   const { date, type, amount, notes } = req.body;
 
   if (!date || amount == null) {
@@ -57,16 +61,17 @@ router.post('/', (req, res) => {
   const movementType = type || (amount >= 0 ? 'deposit' : 'withdrawal');
 
   const result = db.prepare(`
-    INSERT INTO cash_movements (date, type, amount, notes, related_fund_id)
-    VALUES (?, ?, ?, ?, NULL)
-  `).run(date, movementType, amount, notes ?? null);
+    INSERT INTO cash_movements (user_id, date, type, amount, notes, related_fund_id)
+    VALUES (?, ?, ?, ?, ?, NULL)
+  `).run(userId, date, movementType, amount, notes ?? null);
 
-  const movement = db.prepare('SELECT * FROM cash_movements WHERE id = ?').get(result.lastInsertRowid);
+  const movement = db.prepare('SELECT * FROM cash_movements WHERE id = ? AND user_id = ?').get(result.lastInsertRowid, userId);
   res.status(201).json(movement);
 });
 
-router.delete('/:id', (req, res) => {
-  db.prepare('DELETE FROM cash_movements WHERE id = ?').run(req.params.id);
+router.delete('/:id', (req: AuthenticatedRequest, res) => {
+  const userId = req.user!.id;
+  db.prepare('DELETE FROM cash_movements WHERE id = ? AND user_id = ?').run(req.params.id, userId);
   res.status(204).end();
 });
 

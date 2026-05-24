@@ -2,8 +2,10 @@ import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { initializeDatabase } from './db/connection.js';
-import { requireAuth } from './middleware/auth.js';
+import { requireAuth, requireAdmin } from './middleware/auth.js';
+import { logActivity } from './middleware/activity.js';
 import authRouter from './routes/auth.js';
+import adminRouter from './routes/admin.js';
 import fundsRouter from './routes/funds.js';
 import transactionsRouter from './routes/transactions.js';
 import distributionsRouter from './routes/distributions.js';
@@ -18,7 +20,7 @@ import exportRouter from './routes/export.js';
 import performanceRouter from './routes/performance.js';
 
 const app = express();
-const PORT = 3001;
+const PORT = Number(process.env.PORT) || 8001;
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
@@ -36,19 +38,25 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Protected routes (require authentication)
-app.use('/api/funds', requireAuth, fundsRouter);
-app.use('/api/transactions', requireAuth, transactionsRouter);
-app.use('/api/distributions', requireAuth, distributionsRouter);
-app.use('/api/cash', requireAuth, cashRouter);
-app.use('/api/buckets', requireAuth, bucketsRouter);
-app.use('/api/profiles', requireAuth, profilesRouter);
-app.use('/api/prices', requireAuth, pricesRouter);
-app.use('/api/portfolio', requireAuth, portfolioRouter);
-app.use('/api/import', requireAuth, importRouter);
-app.use('/api/snapshots', requireAuth, snapshotsRouter);
-app.use('/api/export', requireAuth, exportRouter);
-app.use('/api/performance', requireAuth, performanceRouter);
+app.use('/api', requireAuth, logActivity);
+app.use('/api/funds', fundsRouter);
+app.use('/api/transactions', transactionsRouter);
+app.use('/api/distributions', distributionsRouter);
+app.use('/api/cash', cashRouter);
+app.use('/api/buckets', bucketsRouter);
+app.use('/api/profiles', profilesRouter);
+app.use('/api/prices', pricesRouter);
+app.use('/api/portfolio', portfolioRouter);
+app.use('/api/import', importRouter);
+app.use('/api/snapshots', snapshotsRouter);
+app.use('/api/export', exportRouter);
+app.use('/api/performance', performanceRouter);
+app.use('/api/admin', requireAdmin, adminRouter);
 
-app.listen(PORT, () => {
-  console.log(`Portfolio Tracker API running on http://localhost:${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Portfolio Tracker API running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
